@@ -1,0 +1,624 @@
+
+
+
+/*************************************************************************************\*/
+/**  PROGRAM NAME : CMS CHILD CORE SET MEASURE CCP_CH_2016.sas*/
+/**  DESCRIPTION  : This program is to assess the use of contraception within women, ages 15-20, for the CY2016 */
+/**  PROGRAMMER   : Shawn Gonsalez */
+/**  REQUESTOR    : R.Brad Kiser(Quality Oversight)**/
+/**  DATE WRITTEN : 08.03.2017;*/
+/**  DATE UPDATED : 08.28.2017;*/
+/*******************************************************************************************/
+
+%LET min_age = 15;
+%LET max_age = 20;
+%LET first_date = MDY(1, 1, 2016);
+%LET first_date_num = 20160101;
+%LET last_date = MDY(12, 30, 2016);
+%LET last_date_num = 20161230;
+%LET cutoff_date = MDY(10, 31, 2016);
+%LET cutoff_date_num = 20161031;
+
+%LET birth_table = tn_vital_stats_births_cy16;
+
+/*Importing codes from Excel file from CMS*/
+
+%LET path =Z:\HCI\CY2017\Development\Shawn\CMS_Core_Measures\;
+%LET file_CCP = 2017-child-adult-CCP-codes.xlsx;
+
+/* option EOC=NO lrecl=MAX compress=yes mrecall mautosource sasautos = ("Z:\HCI\SAS\Macro Library","Z:\HCI\SAS\Macro Library\From Jackob"); */
+
+%MACRO import_sheet(path=, sheet=, out=, start_cell=, end_cell=);
+    PROC IMPORT
+        DATAFILE = "&path."
+        OUT = &out.
+        REPLACE;
+        SHEET = "&sheet.";
+        RANGE='&start_cell.:&end_cell.';
+    RUN;
+
+    DATA &out.;
+        SET &out.;
+        WHERE code IS NOT MISSING;
+    RUN;
+%MEND;
+
+
+
+%import_sheet(path=&path.&file_CCP., sheet=CCP-A, out=CCP_A, start_cell=A2, end_cell=C100);
+%import_sheet(path=&path.&file_CCP., sheet=CCP-B, out=CCP_B, start_cell=A2, end_cell=C100);
+%import_sheet(path=&path.&file_CCP., sheet=CCP-C, out=CCP_C, start_cell=A2, end_cell=D900);
+%import_sheet(path=&path.&file_CCP., sheet=CCP-D, out=CCP_D, start_cell=A2, end_cell=D100);
+%import_sheet(path=&path.&file_CCP., sheet=CCP-E, out=CCP_E, start_cell=A2, end_cell=D100);
+
+
+/* Auxiliary macro to handle dates in numeric format */
+
+%MACRO num_to_date(tbl=, col=);
+    DATA &tbl.;
+        SET &tbl.;
+        FORMAT newcol YYMMDDd10.;
+        newcol = INPUT(PUT(&col., 8.), YYMMDD8.);
+        DROP &col.;
+        RENAME newcol = &col.;
+    RUN;
+%MEND num_to_date;
+
+
+/*pulled data from medicaid monthly tables and t_ca_icn and t_d_re_base using sql code Medicaid_Combined. Table is called sasp1.medicaid_combined2*/
+
+/*Denominator calculation step 1: Identify live births and deliveries by using codes in table CCP-A*/
+
+proc sql;
+drop table med_ccp_a;
+create table med_ccp_a
+as select *
+from sasp1.medicaid_combined2
+where 
+exists (select code from work.ccp_a where substr(cde_diag_prim, 1, length(code)) = code)
+or exists (select code from work.ccp_a where substr(cde_diag_2, 1, length(code)) = code)
+or exists (select code from work.ccp_a where substr(cde_diag_3, 1, length(code)) = code)
+or exists (select code from work.ccp_a where substr(cde_proc_prim, 1, length(code)) = code);
+quit;
+
+/*formatting dates to be the same*/
+data med_ccp_a_2;
+set med_ccp_a;
+format dte_first_service_changed YYMMDDd10.;
+dte_first_service_changed = DATEPART(dte_first_svc);
+format dte_last_service_changed YYMMDDd10.;
+dte_last_service_changed = DATEPART(dte_last_svc);
+drop dte_first_svc dte_last_svc;
+run;
+
+DATA live_birth0;
+    SET med_ccp_a_2;
+RUN;
+
+PROC SQL;
+    CREATE TABLE live_birth1 AS
+        SELECT DISTINCT *
+        FROM live_birth0;
+QUIT;
+
+DATA live_birth2;
+    SET live_birth1;
+RUN;
+
+DATA live_birth3;
+    SET live_birth2;
+    WHERE (&min_age. <= age AND age <= &max_age.);
+RUN; 
+
+DATA live_birth4;
+    SET live_birth3;
+RUN;
+
+PROC SQL;
+    CREATE TABLE live_birth5 AS
+        SELECT DISTINCT *
+        FROM live_birth4;
+QUIT;
+
+PROC SORT
+    DATA = live_birth5;
+    BY sak_recip
+       dte_first_service_changed
+       dte_last_service_changed 
+       descending cde_dtl_status;
+RUN;
+
+DATA live_birth6;
+    SET live_birth5;
+    BY sak_recip dte_first_service_changed dte_last_service_changed;
+    IF LAST.dte_first_service_changed;
+RUN;
+
+
+
+/*denominator calculation step 2: Exclude deliveries that did not end in a live birth by using codes in table ccp-b*/
+
+proc sql;
+drop table med_ccp_b;
+create table med_ccp_b
+as select * 
+from sasp1.medicaid_combined2
+where exists (select code from work.ccp_b where substr(cde_diag_prim, 1, length(code)) = code)
+or exists (select code from work.ccp_b where substr(cde_diag_2, 1, length(code)) = code)
+or exists (select code from work.ccp_b where substr(cde_diag_3, 1, length(code)) = code)
+or exists (select code from work.ccp_b where substr(cde_proc_prim, 1, length(code)) = code);
+quit;
+
+/*formatting dates to be the same*/
+
+data med_ccp_b_2;
+set med_ccp_b;
+format dte_first_service_changed YYMMDDd10.;
+dte_first_service_changed = DATEPART(dte_first_svc);
+format dte_last_service_changed YYMMDDd10.;
+dte_last_service_changed = DATEPART(dte_last_svc);
+drop dte_first_svc dte_last_svc;
+run;
+
+DATA birth_excl0;
+    SET med_ccp_b_2;
+RUN;
+
+PROC SQL;
+    CREATE TABLE birth_excl1 AS
+        SELECT DISTINCT *
+        FROM birth_excl0
+        WHERE sak_recip IN (SELECT sak_recip
+                         FROM live_birth6);
+
+QUIT;
+
+PROC SQL;
+    CREATE TABLE birth_excl2 AS
+        SELECT DISTINCT sak_recip,
+               dte_first_service_changed,
+               dte_last_service_changed
+        FROM birth_excl1;
+QUIT;
+
+PROC SQL;
+    CREATE TABLE live_birth9 AS
+        SELECT *
+        FROM live_birth6 A
+        WHERE NOT EXISTS (SELECT *
+                          FROM birth_excl1 B
+                          WHERE A.sak_recip = B.sak_recip
+                                   AND B.dte_first_service_changed >= A.dte_first_service_changed
+                                AND B.dte_first_service_changed <= A.dte_last_service_changed
+                         );
+QUIT;
+
+/* Determine the specific delivery date (where possible) and
+ensure continuous enrollment for 60 days after delivery */
+
+PROC SQL;
+    CREATE TABLE mbr_data AS
+        SELECT DISTINCT sak_claim,
+                sak_recip,
+               num_ssn,
+               dte_birth,
+               nam_first,
+               nam_last
+        FROM live_birth9;
+QUIT;
+
+
+
+PROC SQL;
+      CREATE TABLE birth_crosscheck AS
+            SELECT A.*,
+                     B.birthdate
+            FROM mbr_data A,
+                  prod.&birth_table. B
+            WHERE (A.num_ssn IS NOT MISSING
+                     AND TRIM(A.num_ssn) = TRIM(B.momssn)
+                    )
+                    OR ((A.num_ssn IS MISSING OR B.momssn IS MISSING)
+                          AND TRIM(A.nam_first) = TRIM(B.momnamefirst)
+                          /* AND TRIM(A.nam_last) = TRIM(B.momnamelast) */
+                          AND (
+                                 TRIM(A.nam_last) = TRIM(SCAN(B.momnamelast, 1, ' -'))
+                                 OR TRIM(A.nam_last) = TRIM(SCAN(B.momnamemiddle, 1, ' -'))
+                               OR TRIM(A.nam_last) = TRIM(SCAN(B.momnamemaidenlast, 1, ' -'))
+                                 OR TRIM(COMPRESS(A.nam_last, ' -')) = TRIM(COMPRESS(B.momnamelast, ' -'))
+                                )
+                          /* AND DAY(dte_birth) = INPUT(momdobday, 2.)
+                          AND MONTH(dte_birth) = INPUT(momdobmo, 2.)
+                          AND YEAR(dte_birth) = INPUT(momdobyr, 4.) */
+                        );
+QUIT;
+
+
+/************************************************************************/
+
+
+PROC SQL;
+    CREATE TABLE birth_crosscheck2 AS
+        SELECT DISTINCT *
+        FROM birth_crosscheck;
+QUIT;
+
+%num_to_date(tbl=birth_crosscheck2, col=birthdate);
+
+DATA birth_crosscheck3;
+    SET birth_crosscheck2;
+    FORMAT delivery YYMMDDd10.;
+    delivery = birthdate;
+    DROP birthdate;
+RUN;
+
+
+
+PROC SQL;
+    CREATE TABLE live_birth10 AS
+        SELECT *
+        FROM live_birth9 A
+             JOIN birth_crosscheck3 B
+             ON A.sak_recip = B.sak_recip;
+QUIT;
+
+
+
+DATA live_birth11;
+    SET live_birth10;
+    /*WHERE dte_first_service_changed <= delivery
+          AND delivery <= dte_last_service_changed;*/
+    DROP num_ssn nam_last nam_first;
+RUN;
+
+
+
+PROC SQL;
+    CREATE TABLE live_birth12 AS
+        SELECT DISTINCT sak_recip,
+               delivery
+        FROM live_birth11;
+QUIT;
+
+DATA live_birth12;
+    SET live_birth12;
+    FORMAT delivery_3 YYMMDDd10.
+           delivery_60 YYMMDDd10.;
+    delivery_3 = INTNX('day', delivery, 3);
+    delivery_60 = INTNX('day', delivery, 60);
+RUN;
+
+
+PROC SQL;
+drop table elig_data;
+    CREATE TABLE elig_data AS
+        SELECT DISTINCT sak_recip,
+               dte_effective as elig_begin ,
+               dte_end AS elig_end 
+        FROM misp1.t_re_elig
+        WHERE sak_recip IN (select (sak_recip)
+                         FROM live_birth12)
+              AND dte_end >= 20160101
+                order by sak_recip;
+QUIT;
+
+
+PROC SQL;
+    CREATE TABLE live_birth13 AS
+        SELECT A.*, B.elig_begin, B.elig_end
+        FROM live_birth12 A
+             JOIN elig_data B
+             ON A.sak_recip = B.sak_recip;
+QUIT;
+
+
+DATA live_birth14;
+    SET live_birth13;
+    /*WHERE elig_begin < delivery
+          AND delivery_60 < elig_end;*/
+RUN;
+
+
+PROC SQL;
+    CREATE TABLE live_birth15 AS
+        SELECT DISTINCT sak_recip,
+               delivery,
+               delivery_3,
+               delivery_60
+        FROM live_birth14;
+QUIT;
+
+
+/*denominator step 3: exclude deliveries that occurred during the last 2 months of the measurement year*/
+
+
+DATA live_birth16;
+    SET live_birth15;
+    WHERE delivery <= &cutoff_date.;
+RUN;
+
+DATA denominator1;
+    SET live_birth16;
+RUN;
+
+
+/*Numerator step 4: Identify women who were provided a most or moderately effective method of contraception in the measurement years using CCP-C table*/
+
+
+proc sql;
+drop table med_ccp_c;
+create table med_ccp_c
+as select * from sasp1.medicaid_combined2
+where exists (select code from work.ccp_c where substr(cde_diag_prim, 1, length(code)) = code)
+or exists (select code from work.ccp_c where substr(cde_diag_2, 1, length(code)) = code)
+or exists (select code from work.ccp_c where substr(cde_diag_3, 1, length(code)) = code)
+or exists (select code from work.ccp_c where substr(cde_proc_prim, 1, length(code)) = code)
+or exists (select code from work.ccp_c where substr(cde_ndc, 1, length(code)) = code);
+quit;
+
+/*formatting dates to be the same*/
+data med_ccp_c_2;
+set med_ccp_c;
+format dte_first_service_changed YYMMDDd10.;
+dte_first_service_changed = DATEPART(dte_first_svc);
+format dte_last_service_changed YYMMDDd10.;
+dte_last_service_changed = DATEPART(dte_last_svc);
+drop dte_first_svc dte_last_svc;
+run;
+
+DATA contra_pre;
+    SET med_ccp_c_2;
+RUN;
+
+DATA contra1;
+    SET contra_pre;
+    DROP num_ssn nam_last nam_first;
+RUN;
+
+
+PROC SQL;
+    CREATE TABLE contra2 AS
+        SELECT *
+        FROM contra1
+        WHERE sak_recip IN (SELECT sak_recip FROM denominator1);
+QUIT;
+
+
+/*numerator step 6: Determine the date that the contraceptive method was provided*/
+
+PROC SQL;
+    CREATE TABLE denominator2 AS
+        SELECT *,
+               (CASE
+                       WHEN EXISTS(SELECT *
+                                FROM contra2 B
+                                WHERE A.sak_recip = B.sak_recip
+                                      AND B.dte_first_service_changed >= A.delivery
+                                      AND B.dte_first_service_changed <= A.delivery_3)
+                    THEN 'Y'
+                    ELSE 'N'
+                END) AS contra_3,
+                 (CASE
+                       WHEN EXISTS(SELECT *
+                                FROM contra2 B
+                                WHERE A.sak_recip = B.sak_recip
+                                      AND B.dte_first_service_changed >= A.delivery
+                                      AND B.dte_first_service_changed <= A.delivery_60)
+                    THEN 'Y'
+                    ELSE 'N'
+                END) AS contra_60
+                FROM denominator1 A;
+QUIT;
+
+
+/*numerator step 5: adjust for larc removals and reinsertions using codes in table ccp-d & ccp-e*/
+
+proc sql;
+drop table med_ccp_d;
+create table med_ccp_d
+as select * from sasp1.medicaid_combined2
+where exists (select code from work.ccp_d where substr(cde_diag_prim, 1, length(code)) = code)
+or exists (select code from work.ccp_d where substr(cde_diag_2, 1, length(code)) = code)
+or exists (select code from work.ccp_d where substr(cde_diag_3, 1, length(code)) = code)
+or exists (select code from work.ccp_d where substr(cde_proc_prim, 1, length(code)) = code);
+quit;
+
+proc sql;
+drop table med_ccp_e;
+create table med_ccp_e
+as select * from sasp1.medicaid_combined2
+where exists (select code from work.ccp_e where substr(cde_diag_prim, 1, length(code)) = code)
+or exists (select code from work.ccp_e where substr(cde_diag_2, 1, length(code)) = code)
+or exists (select code from work.ccp_e where substr(cde_diag_3, 1, length(code)) = code)
+or exists (select code from work.ccp_e where substr(cde_proc_prim, 1, length(code)) = code)
+or exists (select code from work.ccp_e where substr(cde_ndc, 1, length(code)) = code);
+quit;
+
+/*formating dates to be the same*/
+data med_ccp_d_2;
+set med_ccp_d;
+format dte_first_service_changed YYMMDDd10.;
+dte_first_service_changed = DATEPART(dte_first_svc);
+format dte_last_service_changed YYMMDDd10.;
+dte_last_service_changed = DATEPART(dte_last_svc);
+drop dte_first_svc dte_last_svc;
+run;
+
+data med_ccp_e_2;
+set med_ccp_e;
+format dte_first_service_changed YYMMDDd10.;
+dte_first_service_changed = DATEPART(dte_first_svc);
+format dte_last_service_changed YYMMDDd10.;
+dte_last_service_changed = DATEPART(dte_last_svc);
+drop dte_first_svc dte_last_svc;
+run;
+
+
+DATA larc_removal1;
+    SET med_ccp_d_2;
+    DROP num_ssn nam_last nam_first;
+RUN;
+
+
+PROC SQL;
+CREATE TABLE larc_removal2 AS
+        SELECT DISTINCT *
+        FROM larc_removal1
+        WHERE sak_recip IN (SELECT sak_recip
+                         FROM denominator2);
+QUIT;
+
+PROC SQL;
+    CREATE TABLE larc_removal3 AS
+        SELECT DISTINCT sak_recip, dte_first_service_changed
+        FROM larc_removal2;
+QUIT;
+
+
+PROC SQL;
+    CREATE TABLE larc_removal4 AS
+        SELECT *
+        FROM larc_removal3 A
+        WHERE (NOT EXISTS 
+                (SELECT *
+                 FROM contra2 B
+                 WHERE A.sak_recip = B.sak_recip
+                          AND INTCK('day', B.dte_first_service_changed, A.dte_first_service_changed) >= 0
+                       AND INTCK('day', B.dte_first_service_changed, A.dte_first_service_changed) <= 30
+                       AND (
+                            (B.cde_proc_prim IN (select code from work.ccp_c) AND NOT B.cde_proc_prim IN (select code from work.ccp_e))
+                               OR (B.cde_diag_prim IN (select code from work.ccp_c) AND NOT B.cde_diag_prim  IN (select code from work.ccp_e))
+                            OR (B.cde_diag_2 IN (select code from work.ccp_c) AND NOT B.cde_diag_2 IN (select code from work.ccp_e))
+                            OR (B.cde_diag_3 IN (select code from work.ccp_c) AND NOT B.cde_diag_3 IN (select code from work.ccp_e))
+                            OR (B.cde_diag_4 IN (select code from work.ccp_c) AND NOT B.cde_diag_4 IN (select code from work.ccp_e))
+                            OR (B.cde_ndc IN (select code from work.ccp_c) AND NOT B.cde_ndc IN (select code from work.ccp_e))
+                           )
+                 )
+               )
+               AND
+               (NOT EXISTS
+                    (SELECT *
+                     FROM contra2 B
+                     WHERE A.sak_recip = B.sak_recip
+                            AND INTCK('day', A.dte_first_service_changed, B.dte_first_service_changed) > 0
+                    )
+                );
+QUIT;
+
+PROC SQL;
+    CREATE TABLE denominator3 AS
+        SELECT *,
+               (CASE
+                       WHEN EXISTS(SELECT *
+                                FROM larc_removal4 B
+                                WHERE A.sak_recip = B.sak_recip)
+                    THEN 'Y'
+                    ELSE 'N'
+                END) AS larc_removal
+        FROM denominator2 A;
+QUIT;
+
+
+/*numerator rate 2 step 4: define the numerator by identifying women who were provided a LARC in the measurement year, using codes from table ccp-e*/
+
+DATA larc_pre;
+    SET med_ccp_e_2;
+    /* WHERE deny_reason_cd IS MISSING; */
+RUN;
+
+
+DATA larc1;
+    SET larc_pre;
+    DROP num_ssn nam_last nam_first;
+RUN;
+
+
+
+PROC SQL;
+    drop table larc2;
+    CREATE TABLE larc2 AS
+        SELECT *
+        FROM larc1 
+        WHERE sak_recip IN (SELECT sak_recip FROM denominator3);
+QUIT;
+
+
+
+
+/*Step 6: determine the date that the LARC method was provided*/
+
+PROC SQL;
+    CREATE TABLE denominator4 AS
+        SELECT *,
+               (CASE
+                       WHEN EXISTS(SELECT *
+                                FROM larc2 B
+                                WHERE A.sak_recip = B.sak_recip
+                                      AND B.dte_first_service_changed >= A.delivery
+                                      AND B.dte_first_service_changed <= A.delivery_3)
+                    THEN 'Y'
+                    ELSE 'N'
+                END) AS larc_3,
+                 (CASE
+                       WHEN EXISTS(SELECT *
+                                FROM larc2 B
+                                WHERE A.sak_recip = B.sak_recip
+                                      AND B.dte_first_service_changed >= A.delivery
+                                      AND B.dte_first_service_changed <= A.delivery_60)
+                    THEN 'Y'
+                    ELSE 'N'
+                END) AS larc_60
+                FROM denominator3 A;
+QUIT;
+
+
+/*Step 5: Adjust for LARC removals and re-insertions*/
+
+DATA denominator5;
+    SET denominator4;
+        IF larc_removal = 'Y'
+            THEN contra_3 = 'N';
+        IF larc_removal = 'Y'
+            THEN contra_60 = 'N';
+        IF larc_removal = 'Y'
+            THEN larc_3 = 'N';
+        IF larc_removal = 'Y'
+            THEN larc_60 = 'N';
+RUN;
+
+/*Creating Summary Statistics*/
+
+PROC SQL NOPRINT;
+    SELECT COUNT(*)
+    INTO :denom
+    FROM denominator5;
+
+    SELECT COUNT(*)
+    INTO :num_contra_3
+    FROM denominator5
+    WHERE contra_3 = 'Y';
+    
+    SELECT COUNT(*)
+    INTO :num_contra_60
+    FROM denominator5
+    WHERE contra_60 = 'Y';
+
+    SELECT COUNT(*)
+    INTO :num_larc_3
+    FROM denominator5
+    WHERE larc_3 = 'Y';
+
+    SELECT COUNT(*)
+    INTO :num_larc_60
+    FROM denominator5
+    WHERE larc_60 = 'Y';
+
+    CREATE TABLE summary AS
+        SELECT DISTINCT &denom. AS denom,
+               &num_contra_3. AS num_contra_3,
+               &num_contra_60. AS num_contra_60,
+               &num_larc_3. AS num_larc_3,
+               &num_larc_60. AS num_larc_60
+        FROM larc2;
+QUIT;
+
